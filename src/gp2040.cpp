@@ -373,9 +373,16 @@ void GP2040::checkProcessedState(GamepadState prevState, GamepadState currState)
 }
 
 void GP2040::checkSaveRebootState() {
-	if (saveRequested) { saveRequested = false; Storage::getInstance().save(forceSave); }
-	if (rebootRequested) { rebootRequested = false; rebootDelayTimeout = make_timeout_time_ms(rebootDelayMs); }
-	if (!is_nil_time(rebootDelayTimeout) && time_reached(rebootDelayTimeout)) { System::reboot(rebootMode); }
+	if (saveRequested) {
+		saveRequested = false;
+		Storage::getInstance().save(forceSave);
+	}
+
+	if (rebootRequested) {
+		rebootRequested = false;
+        // 直接执行重启，不再等待微小的延迟，这样就不会用到那些报错的变量
+		System::reboot(rebootMode);
+	}
 }
 
 void GP2040::handleStorageSave(GPEvent* e) {
