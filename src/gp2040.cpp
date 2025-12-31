@@ -45,8 +45,7 @@
 // USB Input Class Drivers
 #include "drivermanager.h"
 
-// ... 前面保持不变 (Includes 部分) ...
-
+// --- 拟人化逻辑核心 ---
 #include <cmath>
 #include <cstdlib>
 
@@ -54,10 +53,10 @@ class StickHumanizer {
 private:
     float curX = 32767.5f, curY = 32767.5f;
 
-    // --- 可调参数 ---
-    const float smoothFactor;    // 平滑度 (0.1 - 0.3)
-    const float jitterRange;     // 抖动幅度
-    const float responseCurve;   // 响应曲线 (1.0为线性, >1.0为指数)
+    // 参数配置
+    const float smoothFactor;    // 平滑度 (越小越平滑)
+    const float jitterRange;     // 随机抖动幅度
+    const float responseCurve;   // 响应曲线 (1.0线性, >1.0指数)
     const uint16_t deadzone = 800;
 
 public:
@@ -68,28 +67,26 @@ public:
         float targetX = (float)rawX;
         float targetY = (float)rawY;
 
-        // --- 针对 Issue #1515 的改进：键盘优先级保护 ---
-        // 键盘输入通常产生 0, 32767, 65535。如果检测到这些值，适当提高平滑速度以快速响应
+        // --- 针对 Issue #1515 的修正：检测键盘极值 ---
+        // 如果是按键产生的 0, 32767, 65535，我们适当加速平滑，防止被微小的鼠标漂移信号锁定
         float currentSmooth = smoothFactor;
-        bool isFullInput = (rawX == 0 || rawX == 32767 || rawX == 65535) && 
+        bool isKeyInput = (rawX == 0 || rawX == 32767 || rawX == 65535) && 
                            (rawY == 0 || rawY == 32767 || rawY == 65535);
-        if (isFullInput) currentSmooth *= 1.2f; // 键盘操作时响应更迅速
+        if (isKeyInput) currentSmooth *= 1.25f; 
 
-        // 1. 响应曲线处理 (针对 FPS 视角微调)
+        // 1. 响应曲线处理 (增强 FPS 微调感)
         if (responseCurve > 1.01f) {
             float normX = (targetX - 32767.5f) / 32767.5f;
             float normY = (targetY - 32767.5f) / 32767.5f;
-            
             auto applyCurve = [&](float val) {
                 float sign = (val > 0) ? 1.0f : -1.0f;
                 return std::pow(std::abs(val), responseCurve) * sign;
             };
-
             targetX = applyCurve(normX) * 32767.5f + 32767.5f;
             targetY = applyCurve(normY) * 32767.5f + 32767.5f;
         }
 
-        // 2. 圆形限域 (防止对角线速度达到 1.41 倍)
+        // 2. 圆形限域 (解决对角线 1.414 倍速问题)
         float nX = (targetX - 32767.5f) / 32767.5f;
         float nY = (targetY - 32767.5f) / 32767.5f;
         float mag = std::sqrt(nX*nX + nY*nY);
@@ -98,13 +95,12 @@ public:
             targetY = (nY / mag) * 32767.5f + 32767.5f;
         }
 
-        // 3. 指数平滑处理
+        // 3. 指数平滑 (消除键盘瞬发的“方波”信号)
         curX += (targetX - curX) * currentSmooth;
         curY += (targetY - curY) * currentSmooth;
 
-        // 4. 拟人抖动与死区写回
+        // 4. 拟人抖动与死区判定
         if (std::abs(curX - 32767.5f) > deadzone || std::abs(curY - 32767.5f) > deadzone) {
-            // 在计算结果基础上增加微小随机偏移
             rawX = (uint16_t)(curX + ((std::rand() % 100) / 100.0f - 0.5f) * jitterRange);
             rawY = (uint16_t)(curY + ((std::rand() % 100) / 100.0f - 0.5f) * jitterRange);
         } else {
@@ -114,88 +110,194 @@ public:
     }
 };
 
-// 实例化：左摇杆负责移动（强调平滑），右摇杆负责视角（加入 1.8 倍跟枪曲线）
+// 实例化：左摇杆平滑移动，右摇杆 1.8 倍曲线吸附
 static StickHumanizer leftHumanizer(0.15f, 250.0f, 1.0f); 
 static StickHumanizer rightHumanizer(0.25f, 200.0f, 1.8f);
 
-// ... setup() 部分保持不变，确保有 srand(get_absolute_time()._private_us); ...
+void GP2040::setup() {
+	Storage::getInstance().init();
+
+    // 初始化随机种子
+	srand(get_absolute_time()._private_us);
+
+	PeripheralManager::getInstance().initUSB();
+	if ( PeripheralManager::getInstance().isUSBEnabled(0) ) {
+		set_sys_clock_khz(120000, true); 
+	}
+
+	PeripheralManager::getInstance().initSPI();
+	PeripheralManager::getInstance().initI2C();
+
+	Gamepad * gamepad = new Gamepad();
+	Gamepad * processedGamepad = new Gamepad();
+	Storage::getInstance().SetGamepad(gamepad);
+	Storage::getInstance().SetProcessedGamepad(processedGamepad);
+	Storage::getInstance().setFunctionalPinMappings();
+
+	gamepad->auxState.power.pluggedIn = true;
+	gamepad->auxState.power.charging = false;
+	gamepad->auxState.power.level = GAMEPAD_AUX_MAX_POWER;
+	gamepad->setup();
+	gamepad->lastReinitProfileNumber = Storage::getInstance().getGamepadOptions().profileNumber;
+
+	this->initializeStandardGpio();
+
+	const GamepadOptions& gamepadOptions = Storage::getInstance().getGamepadOptions();
+	bootActions.insert({GAMEPAD_MASK_B1, gamepadOptions.inputModeB1});
+	bootActions.insert({GAMEPAD_MASK_B2, gamepadOptions.inputModeB2});
+	bootActions.insert({GAMEPAD_MASK_B3, gamepadOptions.inputModeB3});
+	bootActions.insert({GAMEPAD_MASK_B4, gamepadOptions.inputModeB4});
+	bootActions.insert({GAMEPAD_MASK_L1, gamepadOptions.inputModeL1});
+	bootActions.insert({GAMEPAD_MASK_L2, gamepadOptions.inputModeL2});
+	bootActions.insert({GAMEPAD_MASK_R1, gamepadOptions.inputModeR1});
+	bootActions.insert({GAMEPAD_MASK_R2, gamepadOptions.inputModeR2});
+
+	adc_init();
+
+	addons.LoadUSBAddon(new KeyboardHostAddon());
+	addons.LoadUSBAddon(new GamepadUSBHostAddon());
+	addons.LoadAddon(new AnalogInput());
+	addons.LoadAddon(new HETriggerAddon());
+	addons.LoadAddon(new BootselButtonAddon());
+	addons.LoadAddon(new DualDirectionalInput());
+	addons.LoadAddon(new FocusModeAddon());
+	addons.LoadAddon(new I2CAnalog1219Input());
+	addons.LoadAddon(new SPIAnalog1256Input());
+	addons.LoadAddon(new WiiExtensionInput());
+	addons.LoadAddon(new SNESpadInput());
+	addons.LoadAddon(new SliderSOCDInput());
+	addons.LoadAddon(new TiltInput());
+	addons.LoadAddon(new RotaryEncoderInput());
+	addons.LoadAddon(new PCF8575Addon());
+	addons.LoadAddon(new TG16padInput());
+	addons.LoadAddon(new ReverseInput());
+	addons.LoadAddon(new TurboInput());
+	addons.LoadAddon(new InputMacro());
+
+	InputMode inputMode = gamepad->getOptions().inputMode;
+	const BootAction bootAction = getBootAction();
+	switch (bootAction) {
+		case BootAction::ENTER_WEBCONFIG_MODE: inputMode = INPUT_MODE_CONFIG; break;
+		case BootAction::ENTER_USB_MODE: reset_usb_boot(0, 0); return;
+		case BootAction::SET_INPUT_MODE_SWITCH: inputMode = INPUT_MODE_SWITCH; break;
+		case BootAction::SET_INPUT_MODE_KEYBOARD: inputMode = INPUT_MODE_KEYBOARD; break;
+		case BootAction::SET_INPUT_MODE_XINPUT: inputMode = INPUT_MODE_XINPUT; break;
+		case BootAction::SET_INPUT_MODE_PS4: inputMode = INPUT_MODE_PS4; break;
+		case BootAction::SET_INPUT_MODE_XBONE: inputMode = INPUT_MODE_XBONE; break;
+		case BootAction::NONE:
+		default: break;
+	}
+
+	DriverManager::getInstance().setup(inputMode);
+	if (inputMode != INPUT_MODE_CONFIG && inputMode != gamepad->getOptions().inputMode) {
+		gamepad->setInputMode(inputMode);
+		Storage::getInstance().save(true);
+	}
+
+	EventManager::getInstance().registerEventHandler(GP_EVENT_STORAGE_SAVE, GPEVENT_CALLBACK(this->handleStorageSave(event)));
+	EventManager::getInstance().registerEventHandler(GP_EVENT_RESTART, GPEVENT_CALLBACK(this->handleSystemReboot(event)));
+}
+
+void GP2040::initializeStandardGpio() {
+	GpioMappingInfo* pinMappings = Storage::getInstance().getProfilePinMappings();
+	buttonGpios = 0;
+	for (Pin_t pin = 0; pin < (Pin_t)NUM_BANK0_GPIOS; pin++) {
+		if (pinMappings[pin].action > 0) {
+			gpio_init(pin);
+			gpio_set_dir(pin, GPIO_IN);
+			gpio_pull_up(pin);
+			buttonGpios |= 1 << pin;
+		}
+	}
+}
+
+void GP2040::deinitializeStandardGpio() {
+	GpioMappingInfo* pinMappings = Storage::getInstance().getProfilePinMappings();
+	for (Pin_t pin = 0; pin < (Pin_t)NUM_BANK0_GPIOS; pin++) {
+		if (pinMappings[pin].action > 0) { gpio_deinit(pin); }
+	}
+}
+
+void GP2040::debounceGpioGetAll() {
+	Mask_t raw_gpio = ~gpio_get_all();
+	Gamepad* gamepad = Storage::getInstance().GetGamepad();
+	if (gamepad->debouncedGpio == (raw_gpio & buttonGpios)) return;
+	uint32_t debounceDelay = Storage::getInstance().getGamepadOptions().debounceDelay;
+	if (debounceDelay == 0) {
+		gamepad->debouncedGpio = raw_gpio;
+		return;
+	}
+	uint32_t now = getMillis();
+	for (Pin_t pin = 0; pin < (Pin_t)NUM_BANK0_GPIOS; pin++) {
+		Mask_t pin_mask = 1 << pin;
+		if (buttonGpios & pin_mask) {
+			if ((gamepad->debouncedGpio & pin_mask) != (raw_gpio & pin_mask) && ((now - gpioDebounceTime[pin]) > debounceDelay)) {
+				gamepad->debouncedGpio ^= pin_mask;
+				gpioDebounceTime[pin] = now;
+			}
+		}
+	}
+}
 
 void GP2040::run() {
-    // ... 前置初始化保持不变 ...
+	bool configMode = DriverManager::getInstance().isConfigMode();
+	GPDriver * inputDriver = DriverManager::getInstance().getDriver();
+	Gamepad * gamepad = Storage::getInstance().GetGamepad();
+	Gamepad * processedGamepad = Storage::getInstance().GetProcessedGamepad();
+	GamepadState prevState;
 
-    while (1) {
-        this->getReinitGamepad(gamepad);
-        memcpy(&prevState, &gamepad->state, sizeof(GamepadState));
+	tud_init(TUD_OPT_RHPORT);
+	USBHostManager::getInstance().start();
+	if (configMode == true ) { rndis_init(); }
 
-        debounceGpioGetAll();
-        gamepad->read();
-        checkRawState(prevState, gamepad->state);
-        USBHostManager::getInstance().process();
+	while (1) {
+		this->getReinitGamepad(gamepad);
+		memcpy(&prevState, &gamepad->state, sizeof(GamepadState));
+		debounceGpioGetAll();
+		gamepad->read();
+		checkRawState(prevState, gamepad->state);
+		USBHostManager::getInstance().process();
 
-        if (configMode == true) {
-            inputDriver->process(gamepad);
-            rebootHotkeys.process(gamepad, configMode);
-            checkSaveRebootState();
-            continue;
-        }
+		if (configMode == true) {
+			inputDriver->process(gamepad);
+			rebootHotkeys.process(gamepad, configMode);
+			checkSaveRebootState();
+			continue;
+		}
 
-        addons.PreprocessAddons();
-        gamepad->hotkey();
-        rebootHotkeys.process(gamepad, configMode);
-        gamepad->process();
+		addons.PreprocessAddons();
+		gamepad->hotkey();
+		rebootHotkeys.process(gamepad, configMode);
+		gamepad->process();
+		addons.ProcessAddons();
 
-        // 关键：在 ProcessAddons 之后执行，这样可以拦截键盘宏、方向映射后的最终坐标
-        addons.ProcessAddons();
-
-        // --- 执行拟人化修饰 ---
-        if (configMode == false) {
+        // --- 拟人化执行位置 ---
+		if (configMode == false) {
             leftHumanizer.apply(gamepad->state.lx, gamepad->state.ly);
             rightHumanizer.apply(gamepad->state.rx, gamepad->state.ry);
         }
 
-        checkProcessedState(processedGamepad->state, gamepad->state);
-        memcpy(&processedGamepad->state, &gamepad->state, sizeof(GamepadState));
+		checkProcessedState(processedGamepad->state, gamepad->state);
+		memcpy(&processedGamepad->state, &gamepad->state, sizeof(GamepadState));
 
-        bool processed = inputDriver->process(gamepad);
-        tud_task();
-        addons.PostprocessAddons(processed);
-        checkSaveRebootState();
-    }
+		bool processed = inputDriver->process(gamepad);
+		tud_task();
+		addons.PostprocessAddons(processed);
+		checkSaveRebootState();
+	}
 }
 
 void GP2040::getReinitGamepad(Gamepad * gamepad) {
 	GamepadOptions& gamepadOptions = Storage::getInstance().getGamepadOptions();
-
-	// Check if profile has changed since last reinit
 	if (gamepad->lastReinitProfileNumber != gamepadOptions.profileNumber) {
 		uint32_t previousProfile = gamepad->lastReinitProfileNumber;
 		uint32_t currentProfile = gamepadOptions.profileNumber;
-
-		// deinitialize the ordinary (non-reserved, non-addon) GPIO pins, since
-		// we are moving off of them and onto potentially different pin assignments
-		// we currently don't support ASSIGNED_TO_ADDON pins being reinitialized,
-		// but if they were to be, that'd be the addon's duty, not ours
 		this->deinitializeStandardGpio();
-
-		// now we can load the latest configured profile, which will map the
-		// new set of GPIOs to use...
 		Storage::getInstance().setFunctionalPinMappings();
-
-		// ...and initialize the pins again
 		this->initializeStandardGpio();
-
-		// now we can tell the gamepad that the new mappings are in place
-		// and ready to use, and the pins are ready, so it should reinitialize itself
 		gamepad->reinit();
-
-		// ...and addons on this core, if they implemented reinit (just things
-		// with simple GPIO pin usage, at time of writing)
 		addons.ReinitializeAddons();
-
-		// Update the last reinit profile
 		gamepad->lastReinitProfileNumber = currentProfile;
-
-		// Trigger the profile change event now that reinit is complete
 		EventManager::getInstance().triggerEvent(new GPProfileChangeEvent(previousProfile, currentProfile));
 	}
 }
@@ -207,194 +309,73 @@ GP2040::BootAction GP2040::getBootAction() {
 		case System::BootMode::USB: return BootAction::ENTER_USB_MODE;
 		case System::BootMode::DEFAULT:
 			{
-				// Determine boot action based on gamepad state during boot
 				Gamepad * gamepad = Storage::getInstance().GetGamepad();
 				Gamepad * processedGamepad = Storage::getInstance().GetProcessedGamepad();
-
 				debounceGpioGetAll();
 				gamepad->read();
-
-				// Pre-Process add-ons for MPGS
 				addons.PreprocessAddons();
-
-				gamepad->process(); // process through MPGS
-
-				// Process for add-ons
+				gamepad->process();
 				addons.ProcessAddons();
-
-				// Copy Processed Gamepad for Core1 (race condition otherwise)
 				memcpy(&processedGamepad->state, &gamepad->state, sizeof(GamepadState));
 
-                const ForcedSetupOptions& forcedSetupOptions = Storage::getInstance().getForcedSetupOptions();
-                bool modeSwitchLocked = forcedSetupOptions.mode == FORCED_SETUP_MODE_LOCK_MODE_SWITCH ||
-                                        forcedSetupOptions.mode == FORCED_SETUP_MODE_LOCK_BOTH;
-
-                bool webConfigLocked  = forcedSetupOptions.mode == FORCED_SETUP_MODE_LOCK_WEB_CONFIG ||
-                                        forcedSetupOptions.mode == FORCED_SETUP_MODE_LOCK_BOTH;
+				const ForcedSetupOptions& forcedSetupOptions = Storage::getInstance().getForcedSetupOptions();
+				bool webConfigLocked = forcedSetupOptions.mode == FORCED_SETUP_MODE_LOCK_WEB_CONFIG || forcedSetupOptions.mode == FORCED_SETUP_MODE_LOCK_BOTH;
 
 				if (gamepad->pressedS1() && gamepad->pressedS2() && gamepad->pressedUp()) {
 					return BootAction::ENTER_USB_MODE;
 				} else if (!webConfigLocked && gamepad->pressedS2()) {
 					return BootAction::ENTER_WEBCONFIG_MODE;
-                } else {
-                    if (!modeSwitchLocked) {
-                        if (auto search = bootActions.find(gamepad->state.buttons); search != bootActions.end()) {
-                            switch (search->second) {
-                                case INPUT_MODE_XINPUT:
-                                    return BootAction::SET_INPUT_MODE_XINPUT;
-                                case INPUT_MODE_SWITCH:
-                                    return BootAction::SET_INPUT_MODE_SWITCH;
-                                case INPUT_MODE_KEYBOARD:
-                                    return BootAction::SET_INPUT_MODE_KEYBOARD;
-                                case INPUT_MODE_GENERIC:
-                                    return BootAction::SET_INPUT_MODE_GENERIC;
-                                case INPUT_MODE_PS3:
-                                    return BootAction::SET_INPUT_MODE_PS3;
-                                case INPUT_MODE_PS4:
-                                    return BootAction::SET_INPUT_MODE_PS4;
-                                case INPUT_MODE_PS5:
-                                    return BootAction::SET_INPUT_MODE_PS5;
-                                case INPUT_MODE_NEOGEO:
-                                    return BootAction::SET_INPUT_MODE_NEOGEO;
-                                case INPUT_MODE_MDMINI:
-                                    return BootAction::SET_INPUT_MODE_MDMINI;
-                                case INPUT_MODE_PCEMINI:
-                                    return BootAction::SET_INPUT_MODE_PCEMINI;
-                                case INPUT_MODE_EGRET:
-                                    return BootAction::SET_INPUT_MODE_EGRET;
-                                case INPUT_MODE_ASTRO:
-                                    return BootAction::SET_INPUT_MODE_ASTRO;
-                                case INPUT_MODE_PSCLASSIC:
-                                    return BootAction::SET_INPUT_MODE_PSCLASSIC;
-                                case INPUT_MODE_XBOXORIGINAL:
-                                    return BootAction::SET_INPUT_MODE_XBOXORIGINAL;
-                                case INPUT_MODE_XBONE:
-                                    return BootAction::SET_INPUT_MODE_XBONE;
-                                case INPUT_MODE_SWITCH_PRO:
-                                    return BootAction::SET_INPUT_MODE_SWITCH_PRO;
-                                default:
-                                    return BootAction::NONE;
-                            }
-                        }
-                    }
-                }
-
+				}
 				break;
 			}
 	}
-
 	return BootAction::NONE;
 }
 
-GP2040::RebootHotkeys::RebootHotkeys() :
-	active(false),
-	noButtonsPressedTimeout(nil_time),
-	webConfigHotkeyMask(GAMEPAD_MASK_S2 | GAMEPAD_MASK_B3 | GAMEPAD_MASK_B4),
-	bootselHotkeyMask(GAMEPAD_MASK_S1 | GAMEPAD_MASK_B3 | GAMEPAD_MASK_B4),
-	rebootHotkeysHoldTimeout(nil_time) {
-}
+GP2040::RebootHotkeys::RebootHotkeys() : active(false), noButtonsPressedTimeout(nil_time), webConfigHotkeyMask(GAMEPAD_MASK_S2 | GAMEPAD_MASK_B3 | GAMEPAD_MASK_B4), bootselHotkeyMask(GAMEPAD_MASK_S1 | GAMEPAD_MASK_B3 | GAMEPAD_MASK_B4), rebootHotkeysHoldTimeout(nil_time) {}
 
 void GP2040::RebootHotkeys::process(Gamepad* gamepad, bool configMode) {
-	// We only allow the hotkey to trigger after we observed no buttons pressed for a certain period of time.
-	// We do this to avoid detecting buttons that are held during the boot process. In particular we want to avoid
-	// oscillating between webconfig and default mode when the user keeps holding the hotkey buttons.
 	if (!active) {
 		if (gamepad->state.buttons == 0) {
-			if (is_nil_time(noButtonsPressedTimeout)) {
-				noButtonsPressedTimeout = make_timeout_time_us(REBOOT_HOTKEY_ACTIVATION_TIME_MS);
-			}
-
-			if (time_reached(noButtonsPressedTimeout)) {
-				active = true;
-			}
-		} else {
-			noButtonsPressedTimeout = nil_time;
-		}
+			if (is_nil_time(noButtonsPressedTimeout)) { noButtonsPressedTimeout = make_timeout_time_us(REBOOT_HOTKEY_ACTIVATION_TIME_MS); }
+			if (time_reached(noButtonsPressedTimeout)) { active = true; }
+		} else { noButtonsPressedTimeout = nil_time; }
 	} else {
 		if (gamepad->state.buttons == webConfigHotkeyMask || gamepad->state.buttons == bootselHotkeyMask) {
-			if (is_nil_time(rebootHotkeysHoldTimeout)) {
-				rebootHotkeysHoldTimeout = make_timeout_time_ms(REBOOT_HOTKEY_HOLD_TIME_MS);
-			}
-
+			if (is_nil_time(rebootHotkeysHoldTimeout)) { rebootHotkeysHoldTimeout = make_timeout_time_ms(REBOOT_HOTKEY_HOLD_TIME_MS); }
 			if (time_reached(rebootHotkeysHoldTimeout)) {
-				if (gamepad->state.buttons == webConfigHotkeyMask) {
-					// If we are in webconfig mode we go to gamepad mode and vice versa
-					System::reboot(configMode ? System::BootMode::GAMEPAD : System::BootMode::WEBCONFIG);
-				} else if (gamepad->state.buttons == bootselHotkeyMask) {
-					System::reboot(System::BootMode::USB);
-				}
+				if (gamepad->state.buttons == webConfigHotkeyMask) { System::reboot(configMode ? System::BootMode::GAMEPAD : System::BootMode::WEBCONFIG); }
+				else if (gamepad->state.buttons == bootselHotkeyMask) { System::reboot(System::BootMode::USB); }
 			}
-		} else {
-			rebootHotkeysHoldTimeout = nil_time;
-		}
+		} else { rebootHotkeysHoldTimeout = nil_time; }
 	}
 }
 
 void GP2040::checkRawState(GamepadState prevState, GamepadState currState) {
-    // buttons pressed
-    if (
-        ((currState.aux & ~prevState.aux) != 0) ||
-        ((currState.dpad & ~prevState.dpad) != 0) ||
-        ((currState.buttons & ~prevState.buttons) != 0)
-    ) {
+    if (((currState.aux & ~prevState.aux) != 0) || ((currState.dpad & ~prevState.dpad) != 0) || ((currState.buttons & ~prevState.buttons) != 0)) {
         EventManager::getInstance().triggerEvent(new GPButtonDownEvent((currState.dpad & ~prevState.dpad), (currState.buttons & ~prevState.buttons), (currState.aux & ~prevState.aux)));
     }
-
-    // buttons released
-    if (
-        ((prevState.aux & ~currState.aux) != 0) ||
-        ((prevState.dpad & ~currState.dpad) != 0) ||
-        ((prevState.buttons & ~currState.buttons) != 0)
-    ) {
+    if (((prevState.aux & ~currState.aux) != 0) || ((prevState.dpad & ~currState.dpad) != 0) || ((prevState.buttons & ~currState.buttons) != 0)) {
         EventManager::getInstance().triggerEvent(new GPButtonUpEvent((prevState.dpad & ~currState.dpad), (prevState.buttons & ~currState.buttons), (prevState.aux & ~currState.aux)));
     }
 }
 
 void GP2040::checkProcessedState(GamepadState prevState, GamepadState currState) {
-    // buttons pressed
-    if (
-        ((currState.aux & ~prevState.aux) != 0) ||
-        ((currState.dpad & ~prevState.dpad) != 0) ||
-        ((currState.buttons & ~prevState.buttons) != 0)
-    ) {
+    if (((currState.aux & ~prevState.aux) != 0) || ((currState.dpad & ~prevState.dpad) != 0) || ((currState.buttons & ~prevState.buttons) != 0)) {
         EventManager::getInstance().triggerEvent(new GPButtonProcessedDownEvent((currState.dpad & ~prevState.dpad), (currState.buttons & ~prevState.buttons), (currState.aux & ~prevState.aux)));
     }
-
-    // buttons released
-    if (
-        ((prevState.aux & ~currState.aux) != 0) ||
-        ((prevState.dpad & ~currState.dpad) != 0) ||
-        ((prevState.buttons & ~currState.buttons) != 0)
-    ) {
+    if (((prevState.aux & ~currState.aux) != 0) || ((prevState.dpad & ~currState.dpad) != 0) || ((prevState.buttons & ~currState.buttons) != 0)) {
         EventManager::getInstance().triggerEvent(new GPButtonProcessedUpEvent((prevState.dpad & ~currState.dpad), (prevState.buttons & ~currState.buttons), (prevState.aux & ~currState.aux)));
     }
-
-    if (
-        (currState.lx != prevState.lx) ||
-        (currState.ly != prevState.ly) ||
-        (currState.rx != prevState.rx) ||
-        (currState.ry != prevState.ry) ||
-        (currState.lt != prevState.lt) ||
-        (currState.rt != prevState.rt)
-    ) {
+    if ((currState.lx != prevState.lx) || (currState.ly != prevState.ly) || (currState.rx != prevState.rx) || (currState.ry != prevState.ry) || (currState.lt != prevState.lt) || (currState.rt != prevState.rt)) {
         EventManager::getInstance().triggerEvent(new GPAnalogProcessedMoveEvent(currState.lx, currState.ly, currState.rx, currState.ry, currState.lt, currState.rt));
     }
 }
 
 void GP2040::checkSaveRebootState() {
-	if (saveRequested) {
-		saveRequested = false;
-		Storage::getInstance().save(forceSave);
-	}
-
-	if (rebootRequested) {
-		rebootRequested = false;
-		rebootDelayTimeout = make_timeout_time_ms(rebootDelayMs);
-	}
-
-	if (!is_nil_time(rebootDelayTimeout) && time_reached(rebootDelayTimeout)) {
-		System::reboot(rebootMode);
-	}
+	if (saveRequested) { saveRequested = false; Storage::getInstance().save(forceSave); }
+	if (rebootRequested) { rebootRequested = false; rebootDelayTimeout = make_timeout_time_ms(rebootDelayMs); }
+	if (!is_nil_time(rebootDelayTimeout) && time_reached(rebootDelayTimeout)) { System::reboot(rebootMode); }
 }
 
 void GP2040::handleStorageSave(GPEvent* e) {
