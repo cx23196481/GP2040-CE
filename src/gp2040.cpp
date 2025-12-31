@@ -45,14 +45,74 @@
 // USB Input Class Drivers
 #include "drivermanager.h"
 
-static const uint32_t REBOOT_HOTKEY_ACTIVATION_TIME_MS = 50;
-static const uint32_t REBOOT_HOTKEY_HOLD_TIME_MS = 4000;
+#include <cmath>
+#include <cstdlib>
 
-const static uint32_t rebootDelayMs = 500;
-static absolute_time_t rebootDelayTimeout = nil_time;
+class StickHumanizer {
+private:
+    float curX = 32767.5f, curY = 32767.5f;
+
+    // --- 可调参数 ---
+    const float smoothFactor;    // 平滑度
+    const float jitterRange;     // 抖动幅度
+    const float responseCurve;   // 响应曲线 (1.0为线性, >1.0为指数)
+    const uint16_t deadzone = 800;
+
+public:
+    // 构造函数，方便为左右摇杆设置不同的灵敏度
+    StickHumanizer(float s, float j, float c) 
+        : smoothFactor(s), jitterRange(j), responseCurve(c) {}
+
+    void apply(uint16_t& rawX, uint16_t& rawY) {
+        float targetX = (float)rawX;
+        float targetY = (float)rawY;
+
+        // 1. 响应曲线处理 (针对 FPS 视角微调)
+        if (responseCurve > 1.01f) {
+            float normX = (targetX - 32767.5f) / 32767.5f;
+            float normY = (targetY - 32767.5f) / 32767.5f;
+            
+            auto applyCurve = [&](float val) {
+                float sign = (val > 0) ? 1.0f : -1.0f;
+                return std::pow(std::abs(val), responseCurve) * sign;
+            };
+
+            targetX = applyCurve(normX) * 32767.5f + 32767.5f;
+            targetY = applyCurve(normY) * 32767.5f + 32767.5f;
+        }
+
+        // 2. 圆形限域 (防止对角线超限)
+        float nX = (targetX - 32767.5f) / 32767.5f;
+        float nY = (targetY - 32767.5f) / 32767.5f;
+        float mag = std::sqrt(nX*nX + nY*nY);
+        if (mag > 1.0f) {
+            targetX = (nX / mag) * 32767.5f + 32767.5f;
+            targetY = (nY / mag) * 32767.5f + 32767.5f;
+        }
+
+        // 3. 指数平滑
+        curX += (targetX - curX) * smoothFactor;
+        curY += (targetY - curY) * smoothFactor;
+
+        // 4. 抖动与死区写回
+        if (std::abs(curX - 32767.5f) > deadzone || std::abs(curY - 32767.5f) > deadzone) {
+            rawX = (uint16_t)(curX + ((rand() % 100) / 100.0f - 0.5f) * jitterRange);
+            rawY = (uint16_t)(curY + ((rand() % 100) / 100.0f - 0.5f) * jitterRange);
+        } else {
+            rawX = 32767;
+            rawY = 32767;
+        }
+    }
+};
+
+// 实例化：左摇杆强调平滑移动，右摇杆加入 1.8 倍响应曲线用于 FPS
+static StickHumanizer leftHumanizer(0.15f, 250.0f, 1.0f); 
+static StickHumanizer rightHumanizer(0.25f, 200.0f, 1.8f);
 
 void GP2040::setup() {
 	Storage::getInstance().init();
+
+	srand(get_absolute_time()._private_us);
 
 	// Reduce CPU if USB host is enabled
 	PeripheralManager::getInstance().initUSB();
@@ -173,9 +233,6 @@ void GP2040::setup() {
 			break;
 		case BootAction::SET_INPUT_MODE_PS5: // PS4 / PS5 Driver
 			inputMode = INPUT_MODE_PS5;
-			break;
-		case BootAction::SET_INPUT_MODE_P5GENERAL:
-			inputMode = INPUT_MODE_P5GENERAL;
 			break;
 		case BootAction::SET_INPUT_MODE_XBONE: // Xbox One Driver
 			inputMode = INPUT_MODE_XBONE;
@@ -329,6 +386,12 @@ void GP2040::run() {
 		// (Post) Process for add-ons
 		addons.ProcessAddons();
 
+		if (configMode == false) {
+            // 分别处理左右摇杆
+            leftHumanizer.apply(gamepad->state.lx, gamepad->state.ly);
+            rightHumanizer.apply(gamepad->state.rx, gamepad->state.ry);
+        }
+
 		checkProcessedState(processedGamepad->state, gamepad->state);
 
 		// Copy Processed Gamepad for Core1 (race condition otherwise)
@@ -439,8 +502,6 @@ GP2040::BootAction GP2040::getBootAction() {
                                     return BootAction::SET_INPUT_MODE_PS4;
                                 case INPUT_MODE_PS5:
                                     return BootAction::SET_INPUT_MODE_PS5;
-                                case INPUT_MODE_P5GENERAL: 
-                                    return BootAction::SET_INPUT_MODE_P5GENERAL;
                                 case INPUT_MODE_NEOGEO:
                                     return BootAction::SET_INPUT_MODE_NEOGEO;
                                 case INPUT_MODE_MDMINI:
