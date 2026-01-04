@@ -1,3 +1,13 @@
+#ifndef CFG_TUH_DEVICE_MAX
+#define CFG_TUH_DEVICE_MAX 4  // 允许最多4个USB设备
+#endif
+#ifndef CFG_TUH_HID
+#define CFG_TUH_HID 4         // 允许最多4个HID实例（键盘、鼠标各占一个）
+#endif
+#ifndef CFG_TUH_HUB
+#define CFG_TUH_HUB 1         // 显式启用集线器支持
+#endif
+
 // GP2040 includes
 #include "gp2040.h"
 #include "helper.h"
