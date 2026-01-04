@@ -233,6 +233,8 @@ void GP2040::run() {
 		gamepad->process();
 		addons.ProcessAddons();
 
+		USBHostManager::getInstance().process();
+
         // --- 拟人化执行位置 ---
 		if (configMode == false) {
             // 左摇杆：由键盘映射产生，需要强平滑防止封号
