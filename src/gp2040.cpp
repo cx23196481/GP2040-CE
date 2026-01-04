@@ -107,7 +107,7 @@ static StickHumanizer rightHumanizer(0.28f, 200.0f, 1.8f);
 
 void GP2040::setup() {
 	Storage::getInstance().init();
-	srand(get_absolute_time()._private_us);
+	srand(to_us_since_boot(get_absolute_time()));
 
 	PeripheralManager::getInstance().initUSB();
 	if ( PeripheralManager::getInstance().isUSBEnabled(0) ) {
