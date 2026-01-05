@@ -229,6 +229,7 @@ void GP2040::run() {
 		gamepad->read();
 		checkRawState(prevState, gamepad->state);
 		USBHostManager::getInstance().process();
+		tud_task(); 
 
 		if (configMode == true) {
 			inputDriver->process(gamepad);
@@ -237,16 +238,16 @@ void GP2040::run() {
 			continue;
 		}
 
-		USBHostManager::getInstance().process(); 
-    tud_task(); // 加上这一行，让系统有时间处理 USB 事件
-
 		addons.PreprocessAddons();
 		gamepad->hotkey();
 		rebootHotkeys.process(gamepad, configMode);
 		gamepad->process();
+
+	  // 此处加载的 Addons 会分别调用 Keyboard 和 Mouse 的读取函数
 		addons.ProcessAddons();
 
-		USBHostManager::getInstance().process();
+		USBHostManager::getInstance().process(); 
+    tud_task(); // 加上这一行，让系统有时间处理 USB 事件
 
         // --- 拟人化执行位置 ---
 		if (configMode == false) {
