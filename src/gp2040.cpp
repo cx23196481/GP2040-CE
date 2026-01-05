@@ -237,6 +237,9 @@ void GP2040::run() {
 			continue;
 		}
 
+		USBHostManager::getInstance().process(); 
+    tud_task(); // 加上这一行，让系统有时间处理 USB 事件
+
 		addons.PreprocessAddons();
 		gamepad->hotkey();
 		rebootHotkeys.process(gamepad, configMode);
